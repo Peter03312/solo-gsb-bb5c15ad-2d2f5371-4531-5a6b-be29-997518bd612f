@@ -9,6 +9,9 @@ import {
   previewCase, commitCase,
 } from './appeals.mjs';
 import { validatePenaltyOps, commitPenaltyOps, listRulings } from './penalties.mjs';
+import {
+  loadTeams, validateTeams, replaceTeams, computeTeamStandings, teamStandingsView,
+} from './teams.mjs';
 import { seedDemo } from './seed.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -82,6 +85,8 @@ app.get('/api/event', (req, res) => {
     assignments: assignmentsView(cfg),
     // 统一停表区间（已合并的不交并集）
     stoppages: cfg.stoppages.map((s) => ({ startSecs: s.start, endSecs: s.end })),
+    // 团体赛名单（队伍代码/名称/号码布）
+    teams: loadTeams(db),
   });
 });
 
@@ -402,6 +407,32 @@ app.post('/api/penalties', (req, res) => {
     totals: result.rulings.totals,
   });
 });
+// ---------- 团体赛名单与榜单 ----------
+app.get('/api/teams', (req, res) => {
+  const cfg = loadConfig(db);
+  if (!cfg) return res.json({ configured: false, revision: 0, teams: [], teamResults: [] });
+  const teams = loadTeams(db);
+  const teamResults = teamStandingsView(computeTeamStandings(teams, computeResults(db, cfg)));
+  res.json({ configured: true, revision: cfg.revision, teams, teamResults });
+});
+
+/**
+ * POST /api/teams 整体替换团体名单（原子生效）：
+ * body: { expectedRevision,
+ *         teams: [{ code, name, bibs: [号码布...] }] }
+ * 重复队码、跨队重复号码布、每队少于三名成员、非法号码布 => 400 整次拒绝（不部分写入）；
+ * 修订号过期 => 409 + currentRevision；提交内容与现有完全一致 => 只读，不推进修订。
+ * 未导入打卡的号码布自动登记选手（先入队，等待读数）。
+ */
+app.post('/api/teams', (req, res) => {
+  if (!checkRevision(req, res)) return;
+  if (!loadConfig(db)) return badRequest(res, '赛事尚未配置，请先设置关卡组');
+  const parsed = validateTeams(req.body?.teams);
+  if (parsed.error) return badRequest(res, parsed.error);
+  const result = replaceTeams(db, parsed.teams);
+  res.json({ ok: true, revision: result.revision, changed: result.changed, teams: parsed.teams });
+});
+
 /**
  * 整批校验：负秒数、同记录号异「原始内容」=> 整批拒绝（事务回滚）。
  * 同号判定以该记录号【首次入库时】的原始读数（bib/point/seconds/kind）为准，
@@ -502,8 +533,9 @@ app.get('/api/punches', (req, res) => {
 
 app.get('/api/results', (req, res) => {
   const cfg = loadConfig(db);
-  if (!cfg) return res.json({ configured: false, results: [], groups: [], divisions: [], assignments: [] });
+  if (!cfg) return res.json({ configured: false, results: [], groups: [], divisions: [], assignments: [], teams: [], teamResults: [] });
   const results = computeResults(db, cfg);
+  const teams = loadTeams(db);
   res.json({
     configured: true,
     revision: cfg.revision,
@@ -514,6 +546,9 @@ app.get('/api/results', (req, res) => {
     divisions: cfg.divisions.map(divisionView),
     assignments: assignmentsView(cfg),
     stoppages: cfg.stoppages.map((s) => ({ startSecs: s.start, endSecs: s.end })),
+    // 团体名单与实时团体榜单（打卡/罚时/停表/赛道/申诉确认后随本接口实时重算）
+    teams,
+    teamResults: teamStandingsView(computeTeamStandings(teams, results)),
     results,
   });
 });
@@ -593,6 +628,10 @@ app.post('/api/appeals/preview', (req, res) => {
     operations,
     affectedCount: preview.affectedCount,
     affected: preview.affected,
+    // 团体榜单预演（只读）：受影响队伍前后成绩/名次（含名次联动队伍）
+    teamCount: preview.teamCount,
+    affectedTeamCount: preview.affectedTeamCount,
+    affectedTeams: preview.affectedTeams,
   });
 });
 
@@ -628,13 +667,15 @@ app.post('/api/appeals/confirm', (req, res) => {
   const v = validateOperations(db, payload.operations);
   if (v.error) return badRequest(res, v.error);
 
-  const { revision, results } = commitCase(db, cfg, v.operations, v.targets);
+  const { revision, results, teamResults } = commitCase(db, cfg, v.operations, v.targets);
   res.json({
     ok: true,
     revision,
     committed: canonicalOps(v.operations),
     auditCount: v.operations.length,
     results,
+    // 团体榜单随整案确认实时重算
+    teamResults,
   });
 });
 
@@ -651,6 +692,9 @@ app.post('/api/publications', (req, res) => {
       .get();
     const version = versionRow.v;
     const results = computeResults(db, cfg);
+    // 团体名单与榜单基于同一成绩快照冻结（与发布同时点一致）
+    const teams = loadTeams(db);
+    const teamStandings = teamStandingsView(computeTeamStandings(teams, results));
     const readings = db
       .prepare(
         `SELECT p.record_no, p.bib, r.name AS runner_name, p.point, p.seconds, p.kind
@@ -674,12 +718,17 @@ app.post('/api/publications', (req, res) => {
     // 冻结发布当时的罚时裁决（含已撤销留痕与逐条审计）；后续登记/撤销不改历史版
     const { rulings: penaltyRulings, audits: penaltyAudits } = listRulings(db);
     const penaltiesJson = JSON.stringify({ rulings: penaltyRulings, audits: penaltyAudits });
+    // 冻结发布当时的团体名单与团体榜单；后续名单维护/成绩重算不改历史版
+    const teamsJson = JSON.stringify({ teams });
+    const teamResultsJson = JSON.stringify(teamStandings);
     const readingsJson = JSON.stringify(readings);
     const resultsJson = JSON.stringify(results);
     db.prepare(
-      `INSERT INTO publication (version, event_revision, note, config_json, stoppages_json, divisions_json, penalties_json, readings_json, results_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(version, cfg.revision, note, configJson, stoppagesJson, divisionsJson, penaltiesJson, readingsJson, resultsJson);
+      `INSERT INTO publication (version, event_revision, note, config_json, stoppages_json, divisions_json,
+                                penalties_json, teams_json, team_results_json, readings_json, results_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(version, cfg.revision, note, configJson, stoppagesJson, divisionsJson,
+      penaltiesJson, teamsJson, teamResultsJson, readingsJson, resultsJson);
     const insR = db.prepare(
       `INSERT INTO published_result (publication_version, bib, name, status, elapsed, net_elapsed, penalty_secs, official_elapsed, fail_at, detail, rank_no, division_code, group_rank)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -688,6 +737,15 @@ app.post('/api/publications', (req, res) => {
       insR.run(version, r.bib, r.name, r.status, r.elapsed, r.netElapsed ?? null,
         r.penaltySecs ?? 0, r.officialElapsed ?? null,
         r.failAt ?? null, r.detail, r.rank ?? null, r.divisionCode ?? null, r.groupRank ?? null);
+    // 冻结团体榜单（成队标志/合计/并列名次/计分三人/全体成员）；旧库迁移的历史版不回填本表
+    const insT = db.prepare(
+      `INSERT INTO published_team (publication_version, team_code, team_name, complete,
+                                   total_official_elapsed, rank_no, members_json, scorers_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const t of teamStandings)
+      insT.run(version, t.code, t.name, t.complete ? 1 : 0, t.totalOfficialElapsed ?? null,
+        t.rank ?? null, JSON.stringify(t.members), JSON.stringify(t.scorers));
     // 发布本身冻结快照；继续推进修订号，使旧页面的导入/发布请求走过期核对
     const rev = bumpRevision(db);
     return { version, rev };
@@ -729,6 +787,9 @@ app.get('/api/publications/:version', (req, res) => {
     divisions: JSON.parse(row.divisions_json || '{"divisions":[],"assignments":[]}'),
     // 冻结的罚时裁决与审计（旧版发布时无裁决，迁移/回填为空集合，按零罚时兼容）
     penalties: JSON.parse(row.penalties_json || '{"rulings":[],"audits":[]}'),
+    // 冻结的团体名单与团体榜单（旧发布版迁移后按无团体名单展示：均为空集合）
+    teams: JSON.parse(row.teams_json || '{"teams":[]}').teams,
+    teamResults: JSON.parse(row.team_results_json || '[]'),
     readings: JSON.parse(row.readings_json),
     results,
   });

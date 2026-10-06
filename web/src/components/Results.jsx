@@ -56,7 +56,7 @@ export default function Results() {
             </span>
           ))
         )}
-        ；排名与并列按<b>净耗时</b>，关卡/终点截止与有效链仍按原始秒数判定。
+        ；排名与并列按<b>正式耗时</b>（无罚时即净耗时），关卡/终点截止与有效链仍按原始秒数判定。
       </p>
       <p className="muted small">
         组别赛道：

@@ -63,6 +63,18 @@ export function seedDemo(db) {
     insPAudit.run('P-DEMO-02', 'register', '003', 30, '初判晚出发 30 秒（待复核）', null);
     insPAudit.run('P-DEMO-02', 'revoke', '003', 30, '初判晚出发 30 秒（待复核）', '复核后认定出发正常，撤销该罚时');
 
+    // 示范团体赛名单：每队至少三人，每名选手只属一队；301 尚未导入打卡（先入队，等待读数）。
+    // 红队 001/004/006 均正式完赛（004=1000、006=1000 并列、001=910）；
+    // 蓝队 002 终点超时、003 组未完成，仅 005 完赛 => 未成队不排名。
+    const insTeam = db.prepare('INSERT INTO team (code, name, seq) VALUES (?, ?, ?)');
+    const insTM = db.prepare('INSERT INTO team_member (team_id, bib, seq) VALUES (?, ?, ?)');
+    // 301 先入队：自动登记选手（无出发，等待打卡导入）
+    db.prepare('INSERT INTO runner (bib, name) VALUES (?, NULL)').run('301');
+    const redId = insTeam.run('RED', '红山队', 1).lastInsertRowid;
+    const blueId = insTeam.run('BLU', '蓝湖队', 2).lastInsertRowid;
+    [['001', 1], ['004', 2], ['006', 3], ['301', 4]].forEach(([bib, seq]) => insTM.run(redId, bib, seq));
+    [['002', 1], ['003', 2], ['005', 3]].forEach(([bib, seq]) => insTM.run(blueId, bib, seq));
+
     // record_no 全局唯一；kind: start | enroute | finish
     // 首次入库时现值即原始读数，orig_* 同步落库
     const insP = db.prepare(

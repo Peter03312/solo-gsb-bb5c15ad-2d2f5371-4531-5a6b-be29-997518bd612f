@@ -72,6 +72,25 @@ CREATE TABLE IF NOT EXISTS runner (
   name TEXT
 );
 
+-- 团体赛队伍：赛事方按「队伍代码 + 名称 + 号码布名单」整体替换维护团体赛名单。
+-- 每名选手只能属一队（team_member.bib 唯一索引保证）；队伍至少登记三人（保存时整次校验）；
+-- 名单中的号码布可尚未导入打卡（先入队，自动登记选手，等待读数）。
+CREATE TABLE IF NOT EXISTS team (
+  id   INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  seq  INTEGER NOT NULL
+);
+
+-- 团体赛名单成员：bib 全局唯一 => 一名选手只能属一队（跨队重复号码布整次拒绝）。
+CREATE TABLE IF NOT EXISTS team_member (
+  team_id INTEGER NOT NULL REFERENCES team(id) ON DELETE CASCADE,
+  bib     TEXT NOT NULL REFERENCES runner(bib),
+  seq     INTEGER NOT NULL,
+  PRIMARY KEY (team_id, bib)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_team_member_bib ON team_member(bib);
+
 -- 打卡原始读数。record_no 全局唯一。
 -- status: active（有效，含被更正后的现值）| voided（裁判作废，不参与核算）
 -- point/seconds/bib/kind 为「现值」（裁判更正会改 point/seconds）；
@@ -135,7 +154,7 @@ CREATE TABLE IF NOT EXISTS penalty_audit (
   at            TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- 发布快照（冻结，不可变）：同时冻结发布当时的停表区间、组别赛道/归属与罚时裁决
+-- 发布快照（冻结，不可变）：同时冻结发布当时的停表区间、组别赛道/归属、罚时裁决与团体名单/榜单
 CREATE TABLE IF NOT EXISTS publication (
   version         INTEGER PRIMARY KEY,
   event_revision  INTEGER NOT NULL,
@@ -145,6 +164,8 @@ CREATE TABLE IF NOT EXISTS publication (
   stoppages_json  TEXT NOT NULL DEFAULT '[]',
   divisions_json  TEXT NOT NULL DEFAULT '{"divisions":[],"assignments":[]}',
   penalties_json  TEXT NOT NULL DEFAULT '{"rulings":[],"audits":[]}',
+  teams_json      TEXT NOT NULL DEFAULT '{"teams":[]}',
+  team_results_json TEXT NOT NULL DEFAULT '[]',
   readings_json   TEXT NOT NULL,
   results_json    TEXT NOT NULL
 );
@@ -168,6 +189,22 @@ CREATE TABLE IF NOT EXISTS published_result (
   division_code TEXT,
   group_rank  INTEGER,
   PRIMARY KEY (publication_version, bib)
+);
+
+-- 发布版团体榜单（便于排名查询）：冻结发布当时的团体名单与正式完赛三人合计/并列名次。
+-- 旧发布版迁移后按无团体名单处理：本表不回填，详情接口 teamResults 返回 []。
+-- complete=1：至少三名正式完赛选手；rank_no 为团体名次（合计相同并列，未成队为 NULL）。
+-- members_json 为当时队伍全部成员（号码布+姓名）；scorers_json 为计分三人 [{bib,name,officialElapsed}]。
+CREATE TABLE IF NOT EXISTS published_team (
+  publication_version INTEGER NOT NULL REFERENCES publication(version),
+  team_code  TEXT NOT NULL,
+  team_name  TEXT NOT NULL,
+  complete   INTEGER NOT NULL,
+  total_official_elapsed INTEGER,
+  rank_no    INTEGER,
+  members_json TEXT NOT NULL,
+  scorers_json TEXT NOT NULL,
+  PRIMARY KEY (publication_version, team_code)
 );
 
 -- 杂项键值（如 seed 标记）

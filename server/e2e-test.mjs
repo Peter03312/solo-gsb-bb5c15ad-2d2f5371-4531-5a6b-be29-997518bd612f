@@ -927,5 +927,174 @@ console.log('12) 罚时裁决：批量登记/撤销、正式耗时名次、幂�
     all.every(x => 'penaltySecs' in x && 'officialElapsed' in x && Array.isArray(x.penalties)));
 }
 
+console.log('13) 团体赛名单与团体榜单');
+{
+  // 13.1 种子含 RED（001/004/006/301，301 无打卡先入队）与 BLU（002/003/005）
+  const t0 = await call('/api/teams');
+  ok('13.1 GET /api/teams 返回两支种子队伍',
+    t0.status === 200 && t0.body.teams.length === 2 &&
+    JSON.stringify(t0.body.teams.find(x => x.code === 'RED').bibs) === JSON.stringify(['001', '004', '006', '301']));
+  const tr = new Map(t0.body.teamResults.map(x => [x.code, x]));
+  // 种子停表已在第 10 节清空：RED 计分 001/004/006 均完赛（910/1000/1000），301 无出发
+  ok('13.1 RED 成队：计分三人 001/004/006 合计 2910',
+    tr.get('RED').complete && tr.get('RED').totalOfficialElapsed === 2910 &&
+    JSON.stringify(tr.get('RED').scorers.map(s => s.bib)) === JSON.stringify(['001', '004', '006']),
+    JSON.stringify(tr.get('RED')));
+  ok('13.1 RED 成员含无出发的 301（officialElapsed=null）',
+    tr.get('RED').members.find(m => m.bib === '301').status === 'no_start');
+  // BLU：002 终点超时、003 组未完成、005 在第 5 节作废重复出发后完赛 980 => 仅 1 人完赛，未成队
+  ok('13.1 BLU 仅 1 人正式完赛：未成队不排名',
+    !tr.get('BLU').complete && tr.get('BLU').rank == null && tr.get('BLU').scorerCount === 1,
+    JSON.stringify(tr.get('BLU')));
+  const ev = (await call('/api/event')).body;
+  ok('13.1 /api/event 附带团体名单', Array.isArray(ev.teams) && ev.teams.length === 2);
+  const rs = (await call('/api/results')).body;
+  ok('13.1 /api/results 附带实时团体榜单', Array.isArray(rs.teamResults) && rs.teamResults.length === 2);
+
+  // 13.2 整次拒绝：重复队码 / 跨队重复号码布 / 少于三人 / 非法号码布（均不落库、不推进修订）
+  const r0 = await rev();
+  const dupCode = await call('/api/teams', { method: 'POST', body: JSON.stringify({ expectedRevision: r0, teams: [
+    { code: 'X', name: '甲', bibs: ['001', '002', '003'] },
+    { code: 'X', name: '乙', bibs: ['004', '005', '006'] },
+  ]})});
+  ok('13.2 重复队码 400 整次拒绝', dupCode.status === 400 && /队伍代码/.test(dupCode.body.error));
+  const crossDup = await call('/api/teams', { method: 'POST', body: JSON.stringify({ expectedRevision: r0, teams: [
+    { code: 'X', name: '甲', bibs: ['001', '002', '003'] },
+    { code: 'Y', name: '乙', bibs: ['001', '004', '005'] },
+  ]})});
+  ok('13.2 跨队重复号码布 400 整次拒绝', crossDup.status === 400 && /跨队重复/.test(crossDup.body.error));
+  const inDup = await call('/api/teams', { method: 'POST', body: JSON.stringify({ expectedRevision: r0, teams: [
+    { code: 'X', name: '甲', bibs: ['001', '001', '003'] },
+  ]})});
+  ok('13.2 同队重复号码布 400', inDup.status === 400 && /队伍「X」内重复/.test(inDup.body.error));
+  const tooFew = await call('/api/teams', { method: 'POST', body: JSON.stringify({ expectedRevision: r0, teams: [
+    { code: 'X', name: '甲', bibs: ['001', '002'] },
+  ]})});
+  ok('13.2 少于三名成员 400 整次拒绝', tooFew.status === 400 && /至少登记三名/.test(tooFew.body.error));
+  const badBib = await call('/api/teams', { method: 'POST', body: JSON.stringify({ expectedRevision: r0, teams: [
+    { code: 'X', name: '甲', bibs: ['001', '002', ''] },
+  ]})});
+  ok('13.2 非法号码布 400 整次拒绝', badBib.status === 400 && /非法号码布/.test(badBib.body.error));
+  const noName = await call('/api/teams', { method: 'POST', body: JSON.stringify({ expectedRevision: r0, teams: [
+    { code: 'X', name: '  ', bibs: ['001', '002', '003'] },
+  ]})});
+  ok('13.2 队名缺失 400', noName.status === 400 && /名称必填/.test(noName.body.error));
+  const stale = await call('/api/teams', { method: 'POST', body: JSON.stringify({ expectedRevision: r0 + 999, teams: [] })});
+  ok('13.2 过期修订 409 带 currentRevision', stale.status === 409 && stale.body.currentRevision === r0);
+  const noRev = await call('/api/teams', { method: 'POST', body: JSON.stringify({ teams: [] })});
+  ok('13.2 缺 expectedRevision 400', noRev.status === 400);
+  ok('13.2 整次拒绝后名单/修订不变',
+    (await call('/api/teams')).body.teams.length === 2 && (await rev()) === r0);
+
+  // 13.3 等价提交不推进修订（顺序无关：队序、成员序不同但内容相同）
+  const cur = (await call('/api/teams')).body.teams;
+  const swapped = [
+    { code: cur[1].code, name: cur[1].name, bibs: [...cur[1].bibs].reverse() },
+    { code: cur[0].code, name: cur[0].name, bibs: cur[0].bibs },
+  ];
+  const noop = await call('/api/teams', { method: 'POST', body: JSON.stringify({ expectedRevision: r0, teams: swapped })});
+  ok('13.3 等价提交（队序/成员序不同）changed=false 且修订不变',
+    noop.status === 200 && noop.body.changed === false && noop.body.revision === r0);
+
+  // 13.4 实际变更原子生效：新增 FAST 队（110/111/112），未打卡新号码布 501 先入队 BLU 不合法 => 改为入 FAST 之外的 NEW 队
+  const setup = await call('/api/teams', { method: 'POST', body: JSON.stringify({ expectedRevision: r0, teams: [
+    { code: 'RED', name: '红山队', bibs: ['001', '004', '006', '301'] },
+    { code: 'BLU', name: '蓝湖队', bibs: ['002', '003', '005', '501'] },
+    { code: 'FAST', name: '疾风队', bibs: ['110', '111', '112'] },
+  ]})});
+  ok('13.4 整体替换成功、修订只 +1',
+    setup.status === 200 && setup.body.changed === true && setup.body.revision === r0 + 1,
+    JSON.stringify(setup.body));
+  const after = new Map((await call('/api/teams')).body.teamResults.map(x => [x.code, x]));
+  // 未打卡号码布 501 先入队：BLU 正式完赛者仍只 005 一人（501 无出发），仍未成队
+  ok('13.4 501 未导入打卡先入队（自动登记、无出发），BLU 仍未成队',
+    after.get('BLU').members.some(m => m.bib === '501' && m.status === 'no_start') &&
+    after.get('BLU').complete === false);
+  // FAST：110/111/112 均完赛（第 12 节裁决后：110=500、112=620、111 罚时已撤销=600）
+  // 以接口实际 officialElapsed 之和为准（断言三人齐全且合计=三者之和）
+  const fast = after.get('FAST');
+  const fastSum = fast.scorers.reduce((n, s) => n + s.officialElapsed, 0);
+  ok('13.4 FAST 成队：计分三人 110/111/112 且合计=三人之和',
+    fast.complete && fast.scorerCount === 3 && fast.totalOfficialElapsed === fastSum,
+    JSON.stringify(fast));
+
+  // 13.5 合计相同并列：构造 TIE 队三人 officialElapsed 合计 == FAST 合计
+  // 直接以正式耗时为目标：导入 bib 511/512/513，使其净耗时（当前无停表）三人之和 == fastSum。
+  // 取 511 完赛 100s、512 完赛 200s、513 完赛 fastSum-300。
+  const f3 = fastSum - 300;
+  const rImp = await rev();
+  const mkFinish = (bib, name, finish) => [
+    { recordNo: `TM-${bib}-1`, bib, name, point: 'S', seconds: 0, kind: 'start' },
+    { recordNo: `TM-${bib}-2`, bib, point: 'A1', seconds: Math.max(1, Math.floor(finish * 0.3)), kind: 'enroute' },
+    { recordNo: `TM-${bib}-3`, bib, point: 'B1', seconds: Math.max(2, Math.floor(finish * 0.6)), kind: 'enroute' },
+    { recordNo: `TM-${bib}-4`, bib, point: 'F', seconds: finish, kind: 'finish' },
+  ];
+  const imp = await call('/api/punches/import', { method: 'POST', body: JSON.stringify({ expectedRevision: rImp,
+    punches: [...mkFinish('511', '团体并列一', 100), ...mkFinish('512', '团体并列二', 200), ...mkFinish('513', '团体并列三', f3)] })});
+  ok('13.5 导入并列队三人读数', imp.status === 200 && imp.body.inserted === 12, JSON.stringify(imp.body));
+  const rT = await rev();
+  const addTie = await call('/api/teams', { method: 'POST', body: JSON.stringify({ expectedRevision: rT, teams: [
+    { code: 'RED', name: '红山队', bibs: ['001', '004', '006', '301'] },
+    { code: 'BLU', name: '蓝湖队', bibs: ['002', '003', '005', '501'] },
+    { code: 'FAST', name: '疾风队', bibs: ['110', '111', '112'] },
+    { code: 'TIE', name: '平支队', bibs: ['511', '512', '513'] },
+  ]})});
+  ok('13.5 加入 TIE 队成功', addTie.status === 200);
+  const tied = new Map((await call('/api/teams')).body.teamResults.map(x => [x.code, x]));
+  ok('13.5 FAST 与 TIE 合计相同 => 并列同名次',
+    tied.get('FAST').totalOfficialElapsed === tied.get('TIE').totalOfficialElapsed &&
+    tied.get('FAST').rank === 1 && tied.get('TIE').rank === 1,
+    JSON.stringify({ f: tied.get('FAST'), t: tied.get('TIE') }));
+
+  // 13.6 整案申诉预演展示受影响队伍前后成绩（含名次联动），预演只读
+  const rA = await rev();
+  // 让 RED 变快以越过并列者：把 301 先补成完赛（导入其终点等），再预演更正 001 罚时无关；
+  // 直接预演更正 511 终点使 TIE 掉出/进入更直观：511 终点改慢 100->400（仍在 B 点后？B1=60 会先于 F=400 ok）
+  const p511 = (await call('/api/punches?bib=511')).body.punches.find(x => x.record_no === 'TM-511-4');
+  const pv = await call('/api/appeals/preview', { method: 'POST', body: JSON.stringify({ expectedRevision: rA, operations: [
+    { punchId: p511.id, action: 'correct', reason: '团体申诉预演', newPoint: 'F', newSeconds: 400 },
+  ]})});
+  ok('13.6 预演成功且含 affectedTeams', pv.status === 200 && Array.isArray(pv.body.affectedTeams));
+  const tieTm = new Map(pv.body.affectedTeams.map(x => [x.code, x])).get('TIE');
+  ok('13.6 TIE 直接受影响：合计增加 300、排名变化',
+    tieTm && tieTm.direct && tieTm.before.totalOfficialElapsed === tied.get('TIE').totalOfficialElapsed &&
+    tieTm.after.totalOfficialElapsed === tieTm.before.totalOfficialElapsed + 300,
+    JSON.stringify(tieTm));
+  ok('13.6 预演只读：榜单与修订不变',
+    (await rev()) === rA &&
+    (await call('/api/teams')).body.teamResults.find(x => x.code === 'TIE').totalOfficialElapsed ===
+      tied.get('TIE').totalOfficialElapsed);
+  const cf = await call('/api/appeals/confirm', { method: 'POST', body: JSON.stringify({ expectedRevision: rA, token: pv.body.token })});
+  ok('13.6 确认成功且返回实时团体榜单',
+    cf.status === 200 && Array.isArray(cf.body.teamResults) &&
+    cf.body.teamResults.find(x => x.code === 'TIE').totalOfficialElapsed === tieTm.after.totalOfficialElapsed);
+
+  // 13.7 发布冻结团体名单与榜单；之后调整名单/成绩不改历史版
+  const rB = await rev();
+  const pub = await call('/api/publications', { method: 'POST', body: JSON.stringify({ expectedRevision: rB, note: '团体冻结版' })});
+  const vTeam = pub.body.version;
+  ok('13.7 发布成功', pub.status === 200);
+  const snap = (await call(`/api/publications/${vTeam}`)).body;
+  ok('13.7 快照冻结四支队伍名单', snap.teams.length === 4);
+  const sTie = snap.teamResults.find(x => x.code === 'TIE');
+  const tieExpected = cf.body.teamResults.find(x => x.code === 'TIE');
+  ok('13.7 快照冻结 TIE 计分三人与合计（最快三人含被改慢后的 512/513/511）',
+    sTie.scorers.length === 3 && sTie.scorers[0].bib === '512' &&
+    sTie.totalOfficialElapsed === tieExpected.totalOfficialElapsed,
+    JSON.stringify({ snap: sTie, live: tieExpected }));
+  const sBlu = snap.teamResults.find(x => x.code === 'BLU');
+  ok('13.7 快照冻结 BLU 未成队（rank=null、complete=false）', sBlu.complete === false && sBlu.rank == null);
+  // 发布后整体清空团体名单：实时为空，历史版不变
+  const rC = await rev();
+  const cleared = await call('/api/teams', { method: 'POST', body: JSON.stringify({ expectedRevision: rC, teams: [] })});
+  ok('13.7 清空名单成功并推进修订', cleared.status === 200 && cleared.body.changed === true);
+  ok('13.7 实时名单/榜单为空',
+    (await call('/api/teams')).body.teams.length === 0 &&
+    (await call('/api/results')).body.teamResults.length === 0);
+  const oldSnap = (await call(`/api/publications/${vTeam}`)).body;
+  ok('13.7 历史版仍冻结四支队伍与榜单',
+    oldSnap.teams.length === 4 && oldSnap.teamResults.length === 4);
+}
+
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail ? 1 : 0);

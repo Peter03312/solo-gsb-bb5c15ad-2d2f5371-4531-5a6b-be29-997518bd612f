@@ -6,6 +6,7 @@
 // 令牌仅绑定「预演时修订号 + 规范化操作集合」，不落任何持久状态（预演因此完全只读）。
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { rankResults, computeRunnerFromReadings, computeResults } from './scoring.mjs';
+import { loadTeams, computeTeamStandings, teamStandingsView } from './teams.mjs';
 
 // 每进程随机签名密钥：服务重启后旧预演令牌失效，需要重新预演（不会导致任何写入）。
 const SECRET = randomBytes(32);
@@ -199,6 +200,7 @@ function resultChanged(a, b) {
 /**
  * 预演整案：返回处理前/后成绩对比（含仅因他人变化而名次改变的选手）。
  * 只读：不修改打卡、审计、修订号与历史发布版。
+ * 团体榜单同样只读预演：返回处理前/后团体成绩，受影响队伍含「仅因名次联动而排名变化」者。
  */
 export function previewCase(db, config, operations, targets) {
   const byBib = snapshotState(db);
@@ -216,6 +218,21 @@ export function previewCase(db, config, operations, targets) {
     .filter((x) => x.direct || x.changed)
     .sort((x, y) => x.after.bib.localeCompare(y.after.bib));
 
+  // 团体榜单预演：名单不变（整案只改打卡），以同一名单核算前后两版团体成绩
+  const teams = loadTeams(db);
+  const teamBefore = computeTeamStandings(teams, before);
+  const teamAfter = computeTeamStandings(teams, after);
+  const teamBeforeMap = new Map(teamBefore.map((t) => [t.code, t]));
+  const affectedTeams = teamAfter
+    .map((t) => {
+      const b = teamBeforeMap.get(t.code);
+      const hasDirectMember = t.members.some((m) => directBibs.has(m.bib));
+      const changed = !b || teamChanged(b, t);
+      return { after: t, before: b, changed, direct: hasDirectMember };
+    })
+    .filter((x) => x.direct || x.changed)
+    .sort((x, y) => x.after.code.localeCompare(y.after.code));
+
   return {
     revision: config.revision,
     affectedCount: affected.length,
@@ -228,7 +245,36 @@ export function previewCase(db, config, operations, targets) {
       before: b ? slimResult(b) : null,
       after: slimResult(a),
     })),
+    teamCount: teams.length,
+    affectedTeamCount: affectedTeams.length,
+    affectedTeams: affectedTeams.map(({ after: a, before: b, changed, direct }) => ({
+      code: a.code,
+      name: a.name,
+      direct,
+      changed,
+      before: b ? slimTeam(b) : null,
+      after: slimTeam(a),
+    })),
   };
+}
+
+const slimTeam = (t) => ({
+  code: t.code,
+  name: t.name,
+  complete: t.complete,
+  rank: t.rank,
+  totalOfficialElapsed: t.totalOfficialElapsed,
+  scorerCount: t.scorerCount,
+  scorers: t.scorers,
+});
+
+/** 团体成绩是否变化（成队标志/合计/名次/计分三人任一不同即视为变化） */
+function teamChanged(a, b) {
+  if (a.complete !== b.complete) return true;
+  if ((a.totalOfficialElapsed ?? null) !== (b.totalOfficialElapsed ?? null)) return true;
+  if ((a.rank ?? null) !== (b.rank ?? null)) return true;
+  const key = (t) => t.scorers.map((s) => `${s.bib}@${s.officialElapsed}`).join('|');
+  return key(a) !== key(b);
 }
 
 /**
@@ -266,5 +312,8 @@ export function commitCase(db, config, operations, targets) {
   const revision = tx();
 
   const freshConfig = { ...config, revision };
-  return { revision, results: computeResults(db, freshConfig) };
+  const results = computeResults(db, freshConfig);
+  // 团体榜单随同一修订实时重算（整案可能改变成队状态/合计/名次）
+  const teamResults = teamStandingsView(computeTeamStandings(loadTeams(db), results));
+  return { revision, results, teamResults };
 }

@@ -37,9 +37,9 @@ export default function Publish({ event, onChanged, onError }) {
     <div className="panel">
       <h2>发布与冻结</h2>
       <p className="muted small">
-        发布时将关卡配置、组别赛道与选手归属、停表区间、罚时裁决、全部有效读数（作废读数除外）及当次成绩
+        发布时将关卡配置、组别赛道与选手归属、停表区间、罚时裁决、<b>团体名单与团体榜单</b>、全部有效读数（作废读数除外）及当次成绩
         （含正式耗时、全场名次与组内名次）一并快照冻结；发布后裁判仍可更正当前数据并发布新版，但<b>历史版本永不改变</b>
-        （冻结后撤销裁决不改历史的 officialElapsed 与名次）。
+        （冻结后撤销裁决或调整团体名单不改历史成绩与团体榜单）。
       </p>
       <div className="inline-fields">
         <label className="grow">版本备注（可选）<input value={note} onChange={e => setNote(e.target.value)} placeholder="如：申诉处理后第二版" /></label>
@@ -135,6 +135,37 @@ export default function Publish({ event, onChanged, onError }) {
               </div>
             </div>
             <div>
+              <h4>冻结团体榜单{((viewing.teamResults || []).length === 0) && <span className="muted small">（该版本无团体名单）</span>}</h4>
+              {(viewing.teamResults || []).length > 0 && (
+                <table className="grid compact">
+                  <thead><tr><th>名次</th><th>队码</th><th>队名</th><th>计分三人</th><th>合计</th></tr></thead>
+                  <tbody>
+                    {viewing.teamResults.map(t => (
+                      <tr key={t.code} className={t.complete ? '' : 'row-dnf'}>
+                        <td>{t.rank ?? '—'}</td>
+                        <td>{t.code}</td>
+                        <td>{t.name}</td>
+                        <td className="small">
+                          {t.complete
+                            ? t.scorers.map(s => `${s.bib} ${fmtTime(s.officialElapsed)}`).join(' + ')
+                            : `正式完赛仅 ${t.scorerCount} 人，未成队`}
+                        </td>
+                        <td>{t.totalOfficialElapsed != null ? <b>{`${fmtTime(t.totalOfficialElapsed)}（${t.totalOfficialElapsed}s）`}</b> : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {(viewing.teams || []).length > 0 && (
+                <>
+                  <h4>冻结团体名单</h4>
+                  <ul className="muted small">
+                    {viewing.teams.map(t => (
+                      <li key={t.code}><b>{t.code}</b> {t.name}：{t.bibs.join(' / ')}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
               <h4>冻结成绩（名次按冻结的正式耗时 officialElapsed = 净耗时 + 有效罚时；组内名次为同组完赛者排名）</h4>
               <table className="grid compact">
                 <thead><tr><th>名次</th><th>组内名次</th><th>号码</th><th>组别</th><th>状态</th><th>原始耗时</th><th>净耗时</th><th>罚时</th><th>正式耗时</th><th>说明</th></tr></thead>

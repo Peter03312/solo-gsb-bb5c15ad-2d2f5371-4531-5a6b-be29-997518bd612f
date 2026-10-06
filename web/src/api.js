@@ -41,6 +41,9 @@ export const api = {
   penalties: () => request('/api/penalties'),
   submitPenalties: payload =>
     request('/api/penalties', { method: 'POST', body: JSON.stringify(payload) }),
+  teams: () => request('/api/teams'),
+  saveTeams: payload =>
+    request('/api/teams', { method: 'POST', body: JSON.stringify(payload) }),
   appealPreview: payload =>
     request('/api/appeals/preview', { method: 'POST', body: JSON.stringify(payload) }),
   appealConfirm: payload =>

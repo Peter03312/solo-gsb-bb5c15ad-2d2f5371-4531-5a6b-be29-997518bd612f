@@ -303,6 +303,45 @@ export default function Appeal({ event, onChanged, onError }) {
         </div>
       )}
 
+      {preview && preview.affectedTeams && preview.affectedTeams.length > 0 && (
+        <div className="preview-box">
+          <h3>受影响团体（{preview.affectedTeamCount} 支 / 共 {preview.teamCount} 支，只读预演）</h3>
+          <p className="muted small">
+            <span className="badge warn">直接受影响</span> 为成员打卡被本申理处理的队伍；
+            <span className="badge ok">名次联动</span> 为自身成员成绩未变、仅因他队变化而团体名次改变的队伍。
+            团体成绩取本队正式完赛选手中 officialElapsed 最短三人合计；未成队不排名。
+          </p>
+          <table className="grid compact">
+            <thead>
+              <tr><th>队码</th><th>队名</th><th>类别</th><th>处理前</th><th>处理后</th></tr>
+            </thead>
+            <tbody>
+              {preview.affectedTeams.map(t => (
+                <tr key={t.code} className={t.direct ? 'row-direct' : 'row-linked'}>
+                  <td>{t.code}</td>
+                  <td>{t.name}</td>
+                  <td>
+                    {t.direct ? <span className="badge warn">直接受影响</span> : <span className="badge ok">名次联动</span>}
+                  </td>
+                  <td>
+                    {t.before?.complete
+                      ? <>名次 <b>{t.before.rank}</b> · 合计 <b>{t.before.totalOfficialElapsed}s（{fmtTime(t.before.totalOfficialElapsed)}）</b>
+                          <div className="small muted">{t.before.scorers.map(s => `${s.bib}:${s.officialElapsed}s`).join(' + ')}</div></>
+                      : <span className="muted small">未成队（正式完赛 {t.before?.scorerCount ?? 0} 人）</span>}
+                  </td>
+                  <td>
+                    {t.after.complete
+                      ? <>名次 <b>{t.after.rank}</b> · 合计 <b>{t.after.totalOfficialElapsed}s（{fmtTime(t.after.totalOfficialElapsed)}）</b>
+                          <div className="small muted">{t.after.scorers.map(s => `${s.bib}:${s.officialElapsed}s`).join(' + ')}</div></>
+                      : <span className="muted small">未成队（正式完赛 {t.after.scorerCount} 人）</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {confirmResult && (
         <div className="preview-box">
           <h3>✅ 整案已确认落库 · 新修订 #{confirmResult.revision}</h3>

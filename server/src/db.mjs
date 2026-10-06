@@ -24,6 +24,7 @@ export function initDb(db = getDb()) {
   migrateStopwatch(db);
   migrateDivisions(db);
   migratePenalties(db);
+  migrateTeams(db);
 }
 
 /**
@@ -119,6 +120,23 @@ function migratePenalties(db) {
       'UPDATE published_result SET official_elapsed = net_elapsed WHERE official_elapsed IS NULL AND net_elapsed IS NOT NULL'
     ).run();
   }
+}
+
+/**
+ * 旧库迁移：团体赛功能新增表/列。
+ * - team / team_member / published_team 为新表，CREATE TABLE IF NOT EXISTS 已自动建立
+ *   （旧库初始无团体名单）；
+ * - publication 增加 teams_json 与 team_results_json（旧发布版冻结当时无团体名单，回填空名单/空榜单）。
+ * 关键兼容：旧发布版详情按「无团体名单」展示——不回填 published_team，
+ *   详情接口 teams 来自 teams_json（空）、teamResults 取 team_results_json（空数组）。
+ * 幂等：列已存在时跳过。
+ */
+function migrateTeams(db) {
+  const pubCols = db.prepare('PRAGMA table_info(publication)').all().map((c) => c.name);
+  if (!pubCols.includes('teams_json'))
+    db.exec(`ALTER TABLE publication ADD COLUMN teams_json TEXT NOT NULL DEFAULT '{"teams":[]}'`);
+  if (!pubCols.includes('team_results_json'))
+    db.exec(`ALTER TABLE publication ADD COLUMN team_results_json TEXT NOT NULL DEFAULT '[]'`);
 }
 
 /** 推进赛事修订号并返回新值（任何配置/读数/更正变化都使旧修订过期） */
